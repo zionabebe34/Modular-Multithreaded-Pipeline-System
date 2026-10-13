@@ -3,6 +3,29 @@
 #include <stdlib.h>
 #include <string.h>
 #include <dlfcn.h>
+#include <unistd.h>
+
+static int copy_file(const char* src_path, const char* dest_path) {
+    FILE* src = fopen(src_path, "rb");
+    if (!src) return -1;
+    FILE* dest = fopen(dest_path, "wb");
+    if (!dest) {
+        fclose(src);
+        return -1;
+    }
+    char buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), src)) > 0) {
+        if (fwrite(buf, 1, n, dest) != n) {
+            fclose(src);
+            fclose(dest);
+            return -1;
+        }
+    }
+    fclose(src);
+    fclose(dest);
+    return 0;
+}
 
 
 typedef const char* (*plugin_init_t)(int);
@@ -14,6 +37,7 @@ typedef const char* (*plugin_wait_finished_t)(void);
 typedef struct {
     void* handle;
     char* name;
+    char* tmp_so_name;
     plugin_init_t init;
     plugin_fini_t fini;
     plugin_place_work_t place_work;
@@ -57,17 +81,48 @@ int main(int argc, char** argv) {
     for (int i = 0; i < args_num; i++) {
         const char* plugin_name = argv[i + 2];
         char so_name[256];
+        char tmp_so_name[512];
         snprintf(so_name, sizeof(so_name), "./output/%s.so", plugin_name);
-        plugins[i].handle = dlopen(so_name, RTLD_NOW | RTLD_LOCAL);
+        snprintf(tmp_so_name, sizeof(tmp_so_name), "./output/.tmp_%s_%d.so", plugin_name, i);
+
+        if (copy_file(so_name, tmp_so_name) != 0) {
+            fprintf(stderr, "Error copying plugin %s to %s\n", so_name, tmp_so_name);
+            for ( int k = 0; k < i; k++ ) {
+                if ( plugins[k].handle ) {
+                    dlclose( plugins[k].handle );
+                }
+                if ( plugins[k].tmp_so_name ) {
+                    unlink( plugins[k].tmp_so_name );
+                    free( plugins[k].tmp_so_name );
+                }
+                if ( plugins[k].name ) {
+                    free( plugins[k].name );
+                }
+            }
+            free(plugins);
+            return 1;
+        }
+
+        plugins[i].tmp_so_name = strdup(tmp_so_name);
+
+        plugins[i].handle = dlopen(tmp_so_name, RTLD_NOW | RTLD_LOCAL);
         if (!plugins[i].handle) {
-            fprintf(stderr, "Error loading plugin %s\n", plugin_name);
+            fprintf(stderr, "Error loading plugin %s from %s: %s\n", plugin_name, tmp_so_name, dlerror());
             print_usage();
+            unlink(tmp_so_name);
+            free(plugins[i].tmp_so_name);
 
             for ( int k = 0; k < i; k++ ) {
                 if ( plugins[k].handle ) {
                     dlclose( plugins[k].handle );
                 }
-                free( plugins[k].name );
+                if ( plugins[k].tmp_so_name ) {
+                    unlink( plugins[k].tmp_so_name );
+                    free( plugins[k].tmp_so_name );
+                }
+                if ( plugins[k].name ) {
+                    free( plugins[k].name );
+                }
             }
             free(plugins);
             return 1;
@@ -78,6 +133,10 @@ int main(int argc, char** argv) {
             for (int k = 0; k <= i; k++) {
                 if (plugins[k].handle) {
                     dlclose(plugins[k].handle);
+                }
+                if (plugins[k].tmp_so_name) {
+                    unlink(plugins[k].tmp_so_name);
+                    free(plugins[k].tmp_so_name);
                 }
                 if (plugins[k].name) {
                     free(plugins[k].name);
@@ -96,10 +155,14 @@ int main(int argc, char** argv) {
 
         if (!plugins[i].init || !plugins[i].fini || !plugins[i].place_work ||
             !plugins[i].attach || !plugins[i].wait_finished) {
-            fprintf(stderr, "dlsym() failed for plugin %s: %s\n", so_name, dlerror());
+            fprintf(stderr, "dlsym() failed for plugin %s: %s\n", tmp_so_name, dlerror());
             for ( int k = 0; k <= i; k++ ) {
                 if ( plugins[k].handle ) {
                     dlclose( plugins[k].handle );
+                }
+                if (plugins[k].tmp_so_name) {
+                    unlink(plugins[k].tmp_so_name);
+                    free(plugins[k].tmp_so_name);
                 }
                 if ( plugins[k].name ) {
                     free( plugins[k].name );
@@ -121,6 +184,10 @@ int main(int argc, char** argv) {
             
             for (int k = 0; k <= i; k++) {
                 if (plugins[k].handle) dlclose(plugins[k].handle);
+                if (plugins[k].tmp_so_name) {
+                    unlink(plugins[k].tmp_so_name);
+                    free(plugins[k].tmp_so_name);
+                }
                 if (plugins[k].name)   free(plugins[k].name);
             }
             free(plugins);
@@ -194,6 +261,10 @@ int main(int argc, char** argv) {
         }
         if ( plugins[i].handle ) {
             dlclose( plugins[i].handle );
+        }
+        if ( plugins[i].tmp_so_name ) {
+            unlink( plugins[i].tmp_so_name );
+            free( plugins[i].tmp_so_name );
         }
         if ( plugins[i].name ) {
             free( plugins[i].name );
